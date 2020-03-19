@@ -76,17 +76,12 @@ namespace Microsoft.Azure.WebJobs.Extensions.Kafka
             this.consumerGroup = string.IsNullOrEmpty(this.listenerConfiguration.ConsumerGroup) ? "$Default" : this.listenerConfiguration.ConsumerGroup;
             this.topicName = this.listenerConfiguration.Topic;
             this.functionId = functionDescriptorId;
+            init();
         }
 
-        public void Cancel()
-        {
-            this.SafeCloseConsumerAsync().GetAwaiter().GetResult();
-        }
-
-        public Task StartAsync(CancellationToken cancellationToken)
+        private void init()
         {
             AzureFunctionsFileHelper.InitializeLibrdKafka(this.logger);
-
             var builder = this.CreateConsumerBuilder(GetConsumerConfiguration());
 
             builder.SetErrorHandler((_, e) =>
@@ -108,18 +103,25 @@ namespace Microsoft.Azure.WebJobs.Extensions.Kafka
             }
 
             this.consumer = builder.Build();
-            
 
             var commitStrategy = new AsyncCommitStrategy<TKey, TValue>(consumer, this.logger);
 
-            functionExecutor = singleDispatch ?
+            this.functionExecutor = singleDispatch ?
                 (FunctionExecutorBase<TKey, TValue>)new SingleItemFunctionExecutor<TKey, TValue>(executor, consumer, this.options.ExecutorChannelCapacity, this.options.ChannelFullRetryIntervalInMs, commitStrategy, logger) :
                 new MultipleItemFunctionExecutor<TKey, TValue>(executor, consumer, this.options.ExecutorChannelCapacity, this.options.ChannelFullRetryIntervalInMs, commitStrategy, logger);
 
             consumer.Subscribe(this.listenerConfiguration.Topic);
 
             this.topicScaler = new Lazy<KafkaTopicScaler<TKey, TValue>>(() => new KafkaTopicScaler<TKey, TValue>(this.listenerConfiguration.Topic, this.consumerGroup, this.functionId, consumer, new AdminClientConfig(GetConsumerConfiguration()), this.logger));
+        }
 
+        public void Cancel()
+        {
+            this.SafeCloseConsumerAsync().GetAwaiter().GetResult();
+        }
+
+        public Task StartAsync(CancellationToken cancellationToken)
+        {
             // Using a thread as opposed to a task since this will be long running
             var thread = new Thread(ProcessSubscription)
             {
@@ -178,6 +180,19 @@ namespace Microsoft.Azure.WebJobs.Extensions.Kafka
                 // Setup native kafka configuration
                 conf.BootstrapServers = this.listenerConfiguration.BrokerList;
                 conf.GroupId = this.listenerConfiguration.ConsumerGroup;
+
+                if (!string.IsNullOrWhiteSpace(conf.SslCaLocation))
+                {
+                    if (AzureFunctionsFileHelper.TryGetValidFilePath(conf.SslCaLocation, out var resolvedSslCaLocation))
+                    {
+                        this.logger.LogDebug("Found SslCaLocation in {filePath}", resolvedSslCaLocation);
+                        conf.SslCaLocation = resolvedSslCaLocation;
+                    }
+                    else
+                    {
+                        this.logger.LogWarning("Could not find valid file path for SslCaLocation {filePath}", conf.SslCaLocation);
+                    }
+                }
             }
             else
             {
